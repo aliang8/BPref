@@ -14,6 +14,7 @@ import hydra
 
 from logger import Logger
 from replay_buffer import ReplayBuffer
+from omegaconf import OmegaConf
 
 class Workspace(object):
     def __init__(self, cfg):
@@ -22,8 +23,7 @@ class Workspace(object):
         self.cfg = cfg
         self.logger = Logger(self.work_dir,
                              save_tb=cfg.log_save_tb,
-                             log_frequency=cfg.log_frequency,
-                             agent=cfg.agent.name)
+                             log_frequency=cfg.log_frequency)
 
         utils.set_seed_everywhere(cfg.seed)
 
@@ -38,13 +38,20 @@ class Workspace(object):
         else:
             self.env = utils.make_env(cfg)
 
-        cfg.agent.params.obs_dim = self.env.observation_space.shape[0]
-        cfg.agent.params.action_dim = self.env.action_space.shape[0]
-        cfg.agent.params.action_range = [
+        cfg.agent.obs_dim = self.env.observation_space.shape[0]
+        cfg.agent.action_dim = self.env.action_space.shape[0]
+        cfg.agent.action_range = [
             float(self.env.action_space.low.min()),
             float(self.env.action_space.high.max())
         ]
-        self.agent = hydra.utils.instantiate(cfg.agent)
+
+        # eval the cfg 
+        agent_cfg = OmegaConf.to_container(cfg.agent, resolve=True)
+        agent_cfg = OmegaConf.create(agent_cfg)
+
+        agent_cfg.critic_cfg = OmegaConf.create(agent_cfg.critic_cfg)
+        agent_cfg.actor_cfg = OmegaConf.create(agent_cfg.actor_cfg)
+        self.agent = hydra.utils.instantiate(agent_cfg, _recursive_=False)
         
         # no relabel
         self.replay_buffer = ReplayBuffer(
@@ -61,7 +68,7 @@ class Workspace(object):
             success_rate = 0
             
         for episode in range(self.cfg.num_eval_episodes):
-            obs = self.env.reset()
+            obs, info = self.env.reset()
             self.agent.reset()
             done = False
             episode_reward = 0
@@ -72,7 +79,7 @@ class Workspace(object):
             while not done:
                 with utils.eval_mode(self.agent):
                     action = self.agent.act(obs, sample=False)
-                obs, reward, done, extra = self.env.step(action)
+                obs, reward, truncated, done, extra = self.env.step(action)
                 episode_reward += reward
                 if self.log_success:
                     episode_success = max(episode_success, extra['success'])
@@ -100,7 +107,7 @@ class Workspace(object):
             episode_success = 0
         start_time = time.time()
         fixed_start_time = time.time()
-        
+
         while self.step < self.cfg.num_train_steps:
             if done:
                 if self.step > 0:
@@ -124,7 +131,7 @@ class Workspace(object):
                     self.logger.log('train/episode_success', episode_success,
                         self.step)
                             
-                obs = self.env.reset()
+                obs, info = self.env.reset()
                 self.agent.reset()
                 done = False
                 episode_reward = 0
@@ -159,7 +166,8 @@ class Workspace(object):
                                             gradient_update=1, K=self.cfg.topK)
             
             
-            next_obs, reward, done, extra = self.env.step(action)      
+            next_obs, reward, truncated, done, extra = self.env.step(action)    
+              
             # allow infinite bootstrap
             done = float(done)
             done_no_max = 0 if episode_step + 1 == self.env._max_episode_steps else done
@@ -179,7 +187,7 @@ class Workspace(object):
 
         self.agent.save(self.work_dir, self.step)
         
-@hydra.main(config_path='config/train.yaml', strict=True)
+@hydra.main(config_path='config', config_name='train', version_base=None)
 def main(cfg):
     workspace = Workspace(cfg)
     workspace.run()
