@@ -26,6 +26,7 @@ COMMON_EVAL_FORMAT = [
     ('episode_reward', 'R', 'float'),
     ('true_episode_reward', 'TR', 'float'),
     ('true_episode_success', 'TS', 'float'),
+    ('success_rate', 'SR', 'float'),
 ]
 
 

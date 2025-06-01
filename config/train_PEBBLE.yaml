@@ -1,5 +1,43 @@
-defaults:
-    - agent: sac
+# defaults:
+#     - agent: sac
+agent:
+    # name: sac
+    _target_: agent.sac.SACAgent
+    obs_dim: ??? # to be specified later
+    action_dim: ??? # to be specified later
+    action_range: ??? # to be specified later
+    device: ${device}
+    critic_cfg: ${double_q_critic}
+    actor_cfg: ${diag_gaussian_actor}
+    discount: 0.99
+    init_temperature: 0.1
+    alpha_lr: 1e-4
+    alpha_betas: [0.9, 0.999]
+    actor_lr: 1e-4
+    actor_betas: [0.9, 0.999]
+    actor_update_frequency: 1
+    critic_lr: 1e-4
+    critic_betas: [0.9, 0.999]
+    critic_tau: 0.005
+    critic_target_update_frequency: 2
+    batch_size: 512 # 1024 for Walker, 512 for Meta-world
+    learnable_temperature: true
+    
+double_q_critic:
+    _target_: agent.critic.DoubleQCritic
+    obs_dim: ${agent.obs_dim}
+    action_dim: ${agent.action_dim}
+    hidden_dim: 256
+    hidden_depth: 3
+    
+diag_gaussian_actor:
+    _target_: agent.actor.DiagGaussianActor
+    obs_dim: ${agent.obs_dim}
+    action_dim: ${agent.action_dim}
+    hidden_depth: 3
+    hidden_dim: 256
+    log_std_bounds: [-5, 2]
+
     
 # this needs to be specified manually
 experiment: PEBBLE
@@ -29,6 +67,12 @@ teacher_eps_equal: 0
 # scheduling
 reward_schedule: 0
 
+# replay buffer collection control
+collect_replay_buffer: true
+target_success_rate: 20.0
+target_return_percentile: 0.5  # For DMControl: middle of convergence value
+eval_frequency_for_collection: 50000  # Every 50k steps for collection check
+
 num_train_steps: 1e6
 replay_buffer_capacity: ${num_train_steps}
 
@@ -53,6 +97,8 @@ gradient_update: 1
 
 # hydra configuration
 hydra:
-    name: ${env}
+    job:
+        name: ${env}
+        chdir: true
     run:
-        dir: ./exp/${env}/H${diag_gaussian_actor.params.hidden_dim}_L${diag_gaussian_actor.params.hidden_depth}_lr${agent.params.actor_lr}/teacher_b${teacher_beta}_g${teacher_gamma}_m${teacher_eps_mistake}_s${teacher_eps_skip}_e${teacher_eps_equal}/label_smooth_${label_margin}/schedule_${reward_schedule}/${experiment}_init${num_seed_steps}_unsup${num_unsup_steps}_inter${num_interact}_maxfeed${max_feedback}_seg${segment}_act${activation}_Rlr${reward_lr}_Rbatch${reward_batch}_Rupdate${reward_update}_en${ensemble_size}_sample${feed_type}_large_batch${large_batch}_seed${seed}
+        dir: ./exp/${env}/H${diag_gaussian_actor.hidden_dim}_L${diag_gaussian_actor.hidden_depth}_lr${agent.actor_lr}/teacher_b${teacher_beta}_g${teacher_gamma}_m${teacher_eps_mistake}_s${teacher_eps_skip}_e${teacher_eps_equal}/label_smooth_${label_margin}/schedule_${reward_schedule}/${experiment}_init${num_seed_steps}_unsup${num_unsup_steps}_inter${num_interact}_maxfeed${max_feedback}_seg${segment}_act${activation}_Rlr${reward_lr}_Rbatch${reward_batch}_Rupdate${reward_update}_en${ensemble_size}_sample${feed_type}_large_batch${large_batch}_seed${seed}
