@@ -17,10 +17,19 @@ import torch.nn as nn
 import torch.nn.functional as F
 import wandb
 from torch.distributions import Normal
+import utils
 from torch.optim.lr_scheduler import CosineAnnealingLR
 
 # MetaWorld imports
 import metaworld
+
+# Import RewardModel from robot_pref
+import sys
+sys.path.append('/scr/aliang80/robot_pref')
+from models.reward_models import RewardModel
+
+# Usage example for reward model relabeling:
+# python iql.py reward_type=reward_model reward_model_path=/path/to/trained/reward_model.pt
 
 TensorBatch = List[torch.Tensor]
 
@@ -34,15 +43,16 @@ LOG_STD_MAX = 2.0
 class TrainConfig:
     # Experiment
     device: str = "cuda"
-    env: str = "button-press-v2-goal-observable"  # MetaWorld environment name
+    env: str = "metaworld_sweep-into-v2"  # MetaWorld environment name
     seed: int = 0  # Sets Gym, PyTorch and Numpy seeds
     eval_freq: int = int(5e3)  # How often (time steps) we evaluate
-    n_episodes: int = 10  # How many episodes run during evaluation
-    max_timesteps: int = int(1e6)  # Max time steps to run environment
+    n_episodes: int = 50  # How many episodes run during evaluation
+    max_timesteps: int = 250000
     checkpoints_path: Optional[str] = None  # Save path
     load_model: str = ""  # Model load file name, "" doesn't load
     # Dataset
-    replay_buffer_path: str = "/scr/aliang80/BPref/exp/metaworld_button-press-v2/H256_L3_lr0.0003/teacher_b-1_g1_m0_s0_e0/label_smooth_0.0/schedule_0/PEBBLE_init1000_unsup9000_inter5000_maxfeed10000_seg50_acttanh_Rlr0.0003_Rbatch50_Rupdate10_en3_sample_large_batch10_seed12345/replay_buffer_step_10000.pkl"  # Path to PEBBLE replay buffer pickle file
+    replay_buffer_path: str = "/scr/aliang80/BPref/exp/metaworld_sweep-into-v2/H256_L3_B512_tau0.005/unsup0_topk5_sac_lr0.0003_temp0.1_seed12345/replay_buffer_step_60000.pkl"  # Path to PEBBLE replay buffer pickle file
+    reward_model_path: str = ""  # Path to trained reward model for reward_model reward type
     # IQL
     buffer_size: int = 1_000_000  # Replay buffer size
     batch_size: int = 256  # Batch size for all networks
@@ -59,8 +69,15 @@ class TrainConfig:
     actor_dropout: Optional[float] = None  # Adroit uses dropout for policy network
     # Wandb logging
     project: str = "robot_pref"
-    group: str = "clvr"
+    entity: str = "clvr"
+    group: str = "IQL-MetaWorld"
     name: str = "IQL"
+    reward_type: str = "zero"  # Options: "zero", "negative", "uniform", "original", "reward_model"
+    # "zero": All rewards set to 0 (sanity check)
+    # "negative": Flip sign of original rewards  
+    # "uniform": Random uniform rewards [0,1]
+    # "original": Keep original rewards from dataset
+    # "reward_model": Use trained reward model to relabel data (requires reward_model_path)
 
     def __post_init__(self):
         self.name = f"{self.name}-{self.env}-{str(uuid.uuid4())[:8]}"
@@ -83,42 +100,42 @@ def normalize_states(states: np.ndarray, mean: np.ndarray, std: np.ndarray):
     return (states - mean) / std
 
 
-def make_metaworld_env(env_name: str, seed: int = 0):
-    """Create a MetaWorld environment with the exact specified name.
+# def make_metaworld_env(env_name: str, seed: int = 0):
+#     """Create a MetaWorld environment with the exact specified name.
 
-    Args:
-        env_name: Exact name of the MetaWorld environment to create
-        seed: Random seed for the environment
+#     Args:
+#         env_name: Exact name of the MetaWorld environment to create
+#         seed: Random seed for the environment
 
-    Returns:
-        MetaWorld environment instance
-    """
-    from metaworld.envs import (
-        ALL_V2_ENVIRONMENTS_GOAL_OBSERVABLE,
-        ALL_V2_ENVIRONMENTS_GOAL_HIDDEN,
-    )
+#     Returns:
+#         MetaWorld environment instance
+#     """
+#     from metaworld.envs import (
+#         ALL_V2_ENVIRONMENTS_GOAL_OBSERVABLE,
+#         ALL_V2_ENVIRONMENTS_GOAL_HIDDEN,
+#     )
 
-    # Try to find the environment in the goal observable environments
-    if env_name in ALL_V2_ENVIRONMENTS_GOAL_OBSERVABLE:
-        env_constructor = ALL_V2_ENVIRONMENTS_GOAL_OBSERVABLE[env_name]
-    # Otherwise, try to find it in the goal hidden environments
-    elif env_name in ALL_V2_ENVIRONMENTS_GOAL_HIDDEN:
-        env_constructor = ALL_V2_ENVIRONMENTS_GOAL_HIDDEN[env_name]
-    else:
-        # If not found, raise a clear error with available options
-        print("Available goal observable environments:")
-        for name in sorted(ALL_V2_ENVIRONMENTS_GOAL_OBSERVABLE.keys()):
-            print(f"  - {name}")
-        print("\nAvailable goal hidden environments:")
-        for name in sorted(ALL_V2_ENVIRONMENTS_GOAL_HIDDEN.keys()):
-            print(f"  - {name}")
-        raise ValueError(
-            f"Environment '{env_name}' not found in MetaWorld environments. Please use one of the listed environments."
-        )
+#     # Try to find the environment in the goal observable environments
+#     if env_name in ALL_V2_ENVIRONMENTS_GOAL_OBSERVABLE:
+#         env_constructor = ALL_V2_ENVIRONMENTS_GOAL_OBSERVABLE[env_name]
+#     # Otherwise, try to find it in the goal hidden environments
+#     elif env_name in ALL_V2_ENVIRONMENTS_GOAL_HIDDEN:
+#         env_constructor = ALL_V2_ENVIRONMENTS_GOAL_HIDDEN[env_name]
+#     else:
+#         # If not found, raise a clear error with available options
+#         print("Available goal observable environments:")
+#         for name in sorted(ALL_V2_ENVIRONMENTS_GOAL_OBSERVABLE.keys()):
+#             print(f"  - {name}")
+#         print("\nAvailable goal hidden environments:")
+#         for name in sorted(ALL_V2_ENVIRONMENTS_GOAL_HIDDEN.keys()):
+#             print(f"  - {name}")
+#         raise ValueError(
+#             f"Environment '{env_name}' not found in MetaWorld environments. Please use one of the listed environments."
+#         )
 
-    # Create the environment with the specified seed
-    env = env_constructor(seed=seed)
-    return env
+#     # Create the environment with the specified seed
+#     env = env_constructor(seed=seed)
+#     return env
 
 
 def wrap_env(
@@ -150,10 +167,14 @@ class ReplayBuffer:
         action_dim: int,
         buffer_size: int,
         device: str = "cpu",
+        reward_type: str = "zero",
+        reward_model: Optional[RewardModel] = None
     ):
         self._buffer_size = buffer_size
         self._pointer = 0
         self._size = 0
+        self.reward_type = reward_type
+        self.reward_model = reward_model
 
         self._states = torch.zeros(
             (buffer_size, state_dim), dtype=torch.float32, device=device
@@ -190,30 +211,68 @@ class ReplayBuffer:
         if rewards.ndim > 1:
             rewards = rewards.squeeze()
         self._rewards[:n_transitions] = self._to_tensor(rewards[..., None])
+
+        # Process rewards based on reward_type
+        if self.reward_type == "zero":
+            self._rewards[:n_transitions] = 0.0
+        elif self.reward_type == "negative":
+            self._rewards[:n_transitions] = -self._rewards[:n_transitions]
+        elif self.reward_type == "uniform":
+            self._rewards[:n_transitions] = self._to_tensor(np.random.uniform(0, 1, size=(n_transitions, 1)))
+        elif self.reward_type == "original":
+            pass  # Keep original rewards
+        elif self.reward_type == "reward_model":
+            if self.reward_model is None:
+                raise ValueError("reward_model must be provided when using reward_model reward_type")
+            
+            print("Relabeling data with reward model...")
+            self.reward_model.eval()
+            batch_size = 1024  # Process in batches to avoid memory issues
+            
+            with torch.no_grad():
+                for start_idx in range(0, n_transitions, batch_size):
+                    end_idx = min(start_idx + batch_size, n_transitions)
+                    
+                    # Get batch of states and actions
+                    batch_states = self._states[start_idx:end_idx]
+                    batch_actions = self._actions[start_idx:end_idx]
+                    
+                    # Predict rewards using the reward model
+                    predicted_rewards = self.reward_model(batch_states, batch_actions)
+                    
+                    # Update rewards in buffer
+                    self._rewards[start_idx:end_idx] = predicted_rewards.unsqueeze(-1)
+            
+
+            # apply min-max normalization to rewards so they bound between 0 and 1
+            min_reward = self._rewards[:n_transitions].min()
+            max_reward = self._rewards[:n_transitions].max()
+            self._rewards[:n_transitions] = (self._rewards[:n_transitions] - min_reward) / (max_reward - min_reward)
+        
+            print(f"Relabeled {n_transitions} transitions with reward model")
+            print(f"New reward stats - Max: {self._rewards[:n_transitions].max():.4f}, Min: {self._rewards[:n_transitions].min():.4f}, Mean: {self._rewards[:n_transitions].mean():.4f}")
+        else:
+            raise ValueError(f"Unknown reward_type: {self.reward_type}. Supported types: zero, negative, uniform, original, reward_model")
         
         self._next_states[:n_transitions] = self._to_tensor(data["next_observations"])
         
         # Handle dones - ensure it's 1D, then add dimension
-        if "dones" in data:
-            dones = data["dones"]
-            if dones.ndim > 1:
-                dones = dones.squeeze()
-            self._dones[:n_transitions] = self._to_tensor(dones[..., None])
-        else:
-            # Convert from not_dones to dones format
-            not_dones = data["not_dones"]
-            if not_dones.ndim > 1:
-                not_dones = not_dones.squeeze()
-            self._dones[:n_transitions] = self._to_tensor((1.0 - not_dones)[..., None])
+        # Convert from not_dones to dones format
+        dones = data["dones"]
+        if dones.ndim > 1:
+            dones = dones.squeeze()
+        self._dones[:n_transitions] = self._to_tensor((1.0 - dones)[..., None])
         
         self._size += n_transitions
         self._pointer = min(self._size, n_transitions)
 
         print(f"Dataset size: {n_transitions}")
-        print(f"Observations shape: {data['observations'].shape}")
-        print(f"Actions shape: {data['actions'].shape}")
-        print(f"Rewards shape: {data['rewards'].shape}")
-        print(f"Dones shape: {data.get('dones', data.get('not_dones', 'N/A'))}")
+        print(f"Observations shape: {self._states.shape}, Max: {self._states.max()}, Min: {self._states.min()}")
+        print(f"Actions shape: {self._actions.shape}, Max: {self._actions.max()}, Min: {self._actions.min()}")
+        print(f"Rewards shape: {self._rewards.shape}, Max: {self._rewards.max()}, Min: {self._rewards.min()}")
+        print(f"Reward type: {self.reward_type}")
+        print(f"Final reward stats - Max: {self._rewards[:n_transitions].max():.4f}, Min: {self._rewards[:n_transitions].min():.4f}, Mean: {self._rewards[:n_transitions].mean():.4f}")
+        print(f"Dones shape: {self._dones.shape}, Max: {self._dones.max()}, Min: {self._dones.min()}")
 
     # Loads data in d4rl format, i.e. from Dict[str, np.array].
     def load_d4rl_dataset(self, data: Dict[str, np.ndarray]):
@@ -267,6 +326,7 @@ def wandb_init(config: dict) -> None:
     wandb.init(
         config=config,
         project=config["project"],
+        entity=config["entity"],
         group=config["group"],
         name=config["name"],
         id=str(uuid.uuid4()),
@@ -622,7 +682,7 @@ class ImplicitQLearning:
 @pyrallis.wrap()
 def train(config: TrainConfig):
     # Create MetaWorld environment
-    env = make_metaworld_env(config.env, config.seed)
+    env = utils.make_metaworld_env(config)
 
     state_dim = env.observation_space.shape[0]
     action_dim = env.action_space.shape[0]
@@ -659,11 +719,26 @@ def train(config: TrainConfig):
         dataset["next_observations"], state_mean, state_std
     )
     env = wrap_env(env, state_mean=state_mean, state_std=state_std)
+    
+    # Load reward model if needed
+    reward_model = None
+    if config.reward_type == "reward_model":
+        if not config.reward_model_path:
+            raise ValueError("reward_model_path must be specified when using reward_model reward_type")
+        
+        print(f"Loading reward model from: {config.reward_model_path}")
+        reward_model = RewardModel(state_dim, action_dim)
+        reward_model.load_state_dict(torch.load(config.reward_model_path, map_location=config.device))
+        reward_model = reward_model.to(config.device)
+        print("Reward model loaded successfully")
+    
     replay_buffer = ReplayBuffer(
         state_dim,
         action_dim,
         config.buffer_size,
         config.device,
+        reward_type=config.reward_type,
+        reward_model=reward_model
     )
     replay_buffer.load_pebble_dataset(dataset)
 

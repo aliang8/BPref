@@ -69,6 +69,7 @@ def make_metaworld_env(cfg):
     
     env = env_cls()
     
+    env._partially_observable = False
     env._freeze_rand_vec = False
     env._set_task_called = True
     env.seed(cfg.seed)

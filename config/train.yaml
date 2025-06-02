@@ -68,9 +68,15 @@ log_save_tb: true
 save_video: false
 save_model: true
 
+# Replay buffer collection control
+collect_replay_buffer: true
+target_success_rate: 50.0  # For MetaWorld - save when success rate >= 70%
+target_episode_return: 1500.0  # For other envs - save when return >= 1500
+
 # hydra configuration
 hydra:
     job:
         name: ${env}
+        chdir: true
     run:
         dir: ./exp/${env}/H${diag_gaussian_actor.hidden_dim}_L${diag_gaussian_actor.hidden_depth}_B${agent.batch_size}_tau${agent.critic_tau}/unsup${num_unsup_steps}_topk${topK}_${experiment}_lr${agent.actor_lr}_temp${agent.init_temperature}_seed${seed}

@@ -62,6 +62,47 @@ class Workspace(object):
         meta_file = os.path.join(self.work_dir, 'metadata.pkl')
         pkl.dump({'cfg': self.cfg}, open(meta_file, "wb"))
 
+        # Replay buffer collection control
+        self.collect_replay_buffer = getattr(cfg, 'collect_replay_buffer', True)
+        self.target_success_rate = getattr(cfg, 'target_success_rate', 50.0)
+        self.target_episode_return = getattr(cfg, 'target_episode_return', 1000.0)  # For non-MetaWorld envs
+        self.replay_buffer_saved = False
+
+    def save_replay_buffer(self):
+        """Save the replay buffer to disk"""
+        if self.replay_buffer_saved:
+            return
+            
+        save_path = os.path.join(self.work_dir, f'replay_buffer_step_{self.step}.pkl')
+        
+        # Create a dictionary with replay buffer data and metadata
+        buffer_data = {
+            'observations': self.replay_buffer.obses[:self.replay_buffer.idx],
+            'actions': self.replay_buffer.actions[:self.replay_buffer.idx],
+            'rewards': self.replay_buffer.rewards[:self.replay_buffer.idx],
+            'next_observations': self.replay_buffer.next_obses[:self.replay_buffer.idx],
+            'dones': self.replay_buffer.not_dones[:self.replay_buffer.idx],
+            'step': self.step,
+            'size': self.replay_buffer.idx,
+            'env': self.cfg.env,
+        }
+        
+        with open(save_path, 'wb') as f:
+            pkl.dump(buffer_data, f)
+        
+        self.replay_buffer_saved = True
+        print(f"Replay buffer saved to: {save_path}")
+        print(f"Buffer size: {self.replay_buffer.idx}")
+        print("Training will end after saving replay buffer.")
+        
+        # Also save a summary file
+        summary_path = os.path.join(self.work_dir, 'replay_buffer_summary.txt')
+        with open(summary_path, 'w') as f:
+            f.write(f"Replay Buffer Collection Summary\n")
+            f.write(f"Environment: {self.cfg.env}\n")
+            f.write(f"Collection stopped at step: {self.step}\n")
+            f.write(f"Buffer size: {self.replay_buffer.idx}\n")
+
     def evaluate(self):
         average_episode_reward = 0
         if self.log_success:
@@ -101,6 +142,25 @@ class Workspace(object):
                         self.step)
         self.logger.dump(self.step)
         
+        # Check if we should save replay buffer based on current performance
+        if self.collect_replay_buffer and not self.replay_buffer_saved and self.step % 50000 == 0:
+            should_save = False
+            
+            if self.log_success:
+                # For MetaWorld environments - check success rate
+                if success_rate >= self.target_success_rate:
+                    print(f"Target success rate reached: {success_rate:.2f}% >= {self.target_success_rate}%")
+                    should_save = True
+            else:
+                # For other environments - check episode return
+                if average_episode_reward >= self.target_episode_return:
+                    print(f"Target episode return reached: {average_episode_reward:.2f} >= {self.target_episode_return}")
+                    should_save = True
+            
+            if should_save:
+                self.save_replay_buffer()
+                self.collect_replay_buffer = False  # Stop further collection
+        
     def run(self):
         episode, episode_reward, done = 0, 0, True
         if self.log_success:
@@ -109,6 +169,11 @@ class Workspace(object):
         fixed_start_time = time.time()
 
         while self.step < self.cfg.num_train_steps:
+            # Check if replay buffer was saved and end training
+            if self.replay_buffer_saved:
+                print("Replay buffer saved. Ending training early.")
+                break
+                
             if done:
                 if self.step > 0:
                     self.logger.log('train/duration',
@@ -186,6 +251,11 @@ class Workspace(object):
             self.step += 1
 
         self.agent.save(self.work_dir, self.step)
+        
+        # Save replay buffer at the end if collection is still active and training completed normally
+        if self.collect_replay_buffer and not self.replay_buffer_saved:
+            print("Training completed without reaching target. Saving replay buffer...")
+            self.save_replay_buffer()
         
 @hydra.main(config_path='config', config_name='train', version_base=None)
 def main(cfg):
